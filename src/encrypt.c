@@ -2,10 +2,15 @@
  * algorithm RTEA-256-PCBC
  * 
  * File struct:
- *  7  bytes : signatute "RTEA256"
- *  1  byte  : block size - bytes in last block
- *  8  bytes : encrypted IV
- * 8*N bytes : encrypted N blocks with mode PCBC
+ * - Header
+ *   1 byte  : non-ASCII character 0xC2
+ *   4 bytes : signatute "RTEA"
+ *   1 byte  : length in bytes of key (always 32)
+ *   1 byte  : block size - bytes in last block
+ *   1 byte  : padding, always zero
+ *   8 bytes : encrypted IV
+ * - Encrypted data
+ *   8*N bytes : encrypted N blocks with mode PCBC
  * 
  * Padding byte: 0x01
  */
@@ -46,7 +51,7 @@ int pcbc_encrypt(FILE* in, FILE* out, const uint32_t key[8]) {
     if (!res) return PCBC_NO_IV;
 
     // write signature and IV
-    fwrite("RTEA256\0", 1, 8, out);
+    fwrite("\xC2RTEA\40\0\0", 1, 8, out);
     uint64_t cip_prev_xor = rtea256e(prev_xor, key);
     fwrite(&cip_prev_xor, sizeof cip_prev_xor, 1, out);
 
@@ -66,7 +71,7 @@ int pcbc_encrypt(FILE* in, FILE* out, const uint32_t key[8]) {
     }
 
     // save count tail bytes
-    fseek(out, 7, SEEK_SET);
+    fseek(out, 6, SEEK_SET);
     fwrite(&rdlen, 1, 1, out);
 
     return PCBC_SUCCESS;
@@ -77,9 +82,13 @@ int pcbc_decrypt(FILE* in, FILE* out, const uint32_t key[8]) {
     char header[8];
     if (!fread(header, sizeof header, 1, in))
         return PCBC_NO_HEADER;
-    if (memcmp(header, "RTEA256", 7) != 0)
+    if (memcmp(header, "\xC2RTEA\40", 6) != 0 && !header[7])
         return PCBC_INCOR_HEADER;
-    
+
+    // read header data
+    size_t last_len = header[6] & 7;
+    last_len = last_len ? last_len : 8;
+
     // load IV
     uint64_t prev_xor;
     if (!fread(&prev_xor, sizeof prev_xor, 1, in))
@@ -92,15 +101,13 @@ int pcbc_decrypt(FILE* in, FILE* out, const uint32_t key[8]) {
     while (true) {
         flen += (rdlen = fread(&cipher, 1, sizeof cipher, in));
         if (rdlen == 0) {
-            if (flen >= sizeof cipher) {
-                size_t lastlen = header[7] & 7; // use only first 3 bits
-                fwrite(&prev, lastlen ? lastlen : sizeof prev, 1, out);
-            }
+            if (flen >= sizeof cipher)
+                fwrite(&prev, last_len, 1, out);
             break;
         } else if (rdlen < sizeof cipher) {
             return PCBC_NOT_ALIGN;
         }
-        
+
         plain = rtea256d(cipher, key) ^ prev_xor;
         if (flen >= 2 * sizeof cipher)
             fwrite(&prev, sizeof prev, 1, out);
